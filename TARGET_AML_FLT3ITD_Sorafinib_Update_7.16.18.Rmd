@@ -1,0 +1,1077 @@
+---
+title: "Sorafinib FLT3-ITD Survival"
+author: "Jenny Smith"
+date: "October 2, 2017"
+output: html_document
+---
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 8, fig.width = 10)
+knitr::opts_knit$set(root.dir ='/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/Clinical/analysis/2017.10.01_Flt3ITD_Sorafinib/')
+```
+
+
+```{r message=FALSE}
+library(magrittr)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+getwd()
+```
+
+
+```{r}
+source("~/scripts/survival_analysis/Survplot_Functions_2017.03.31.r")
+```
+
+
+#Define Functions to Be Used
+
+```{r}
+#dosage allelic ratio groups (dar)
+dar <- function(df){
+  cols <- c("Sorafinib.InductionI", "FLT3ITD.Status")
+  G <- NULL
+  for (i in 1:nrow(df)){
+    chars <- df[i,cols]
+    c1 <- if (is.na(chars[1])){"NoSora"}else if (chars[1] >= 1000){"Sora.GE.1000mg"}else if (chars[1] < 1000){"Sora.LT.1000mg"}
+    c2 <- if (chars[2] == "high"){"HiAR"}else if (chars[2] == "low"){"LoAR"}
+    g <- paste(c1,c2, sep = ".")
+    G <- c(G,g)
+  }
+  names(G) <- df$Patient.registration.number
+  return(G)
+}
+
+```
+
+```{r}
+NupStatus <- function(df){
+  cols <- c("NUP98.NSD1_RNAseq", "NUP98.NSD1_qPCR")
+  n <- nrow(df)
+  
+  NUP <- NULL
+  for (i in 1:n){
+    rnaseq <- df[i,cols[1]]
+    qpcr <- df[i,cols[2]]
+    
+    if (identical(rnaseq,qpcr)){
+      status <- rnaseq
+    }else if (rnaseq == "unknown" & ! is.na(qpcr)){
+      status <- qpcr
+    }else{
+      status <- "unknown"
+    }
+    NUP <- c(NUP,status)
+  }
+  return(NUP)
+}
+  
+```
+
+
+```{r}
+#calculate the earliest date to event (relapse or failure)
+DateOFEvent <- function(df){
+  cols <- c("Date.of.first.relapse", "Induction.1.failure.date","Induction.2.failure.date")
+
+  dates <- as.Date(integer(0),origin= "1899-12-30") #place holder time to initialize variable. 
+  for (i in 1:nrow(df)){
+    r <- df[i,cols[1]]
+    f1 <- df[i, cols[2]]
+    f2 <- df[i, cols[3]]
+    
+    events <- c(r,f1,f2)
+    if (all(is.na(events))){
+      d <- NA
+    }else{
+      d <- min(events, na.rm=TRUE)
+    }
+    dates <- c(dates,d)
+  }
+  return(dates)
+
+}
+```
+
+```{r}
+catSoraGroups <- function(NSD1.with.Sora){
+  s <- str_split_fixed(NSD1.with.Sora, pattern = "\\.", n=5) #split
+  
+  sn <- paste(s[,1], ifelse(s[,4] == "", s[,3],s[,5]), sep=".") %>%
+    gsub("negative", "ITD.NSD1-", .) %>% 
+    gsub("positive", "ITD.NSD1+", .)
+  
+  return(sn)
+}
+```
+
+
+```{r}
+mergeMolCols <- function(col1,col2){
+  data <- paste(col1,col2, sep=" ") %>%
+    gsub("^ | $", "", .) %>%
+    sapply(., unique) 
+  
+  #change all empty strings
+  data[data==""] <- "Not evaluated"
+  
+  return(data)
+}
+```
+
+```{r}
+mutationGroup <- function(NPM1,CEBPA,NUP98.NSD1,CBF=FALSE,inv.16.16_t.16.16=NULL,t.8.21=NULL){
+#yes,this assumes if CBF-AML + FLT3-ITD, does not have any additional co-occuring mutations. 
+  
+  NPM1orCEBPA <-  any(grepl("Pos|Yes",c(NPM1,CEBPA),ignore.case=TRUE))
+  NSD1 <- grepl("Pos|Yes", NUP98.NSD1, ignore.case = TRUE)
+  
+  if (NPM1orCEBPA){
+    grp <- "NPM1 or CEBPA, FLT3-ITD"
+
+  }else if (NSD1){
+    grp <- "NUP98-NSD1, FLT3-ITD" #NOTE THERE IS ONE NUP98-NSD1 + NPM1 + FLT3-ITD patient.... in0531
+
+  }else{
+    grp <- "FLT3-ITD"
+
+  }
+
+  if (CBF){ #ONE patient is NSD1+ and Inv16 ... in 0531
+    grp[grepl("Pos|Yes", inv.16.16_t.16.16, ignore.case = TRUE) | grepl("Pos|Yes",t.8.21, ignore.case = TRUE)] <- "CBF, FLT3-ITD"
+  }
+
+  return(grp)
+}
+```
+
+```{r}
+saveMultiPlots <- function(KM.plots.res,col){
+  N <- nrow(KM.plots.res)
+  lapply(1:N, function(x) ggsave(filename =
+                                 paste("CEBPA_NPM1_NSD1",KM.plots.res[[1]][x],col,"KMplot.tiff", sep="_"),
+                                                 plot = KM.plots.res[[col]][[x]], device = "tiff",
+                                                 width = 9, height = 5, dpi=300))
+}
+```
+
+
+
+#Read in the ITD, Mutation, and Arm information 
+
+```{r}
+# itd <- read.csv("~/reference_mapping-files/AAML1031_ITDpos_data_091917.csv", stringsAsFactors = FALSE)
+itd <- read.csv("~/reference_mapping-files/AAML1031_ITDpos_data_091917_molecular_added.csv", stringsAsFactors = FALSE)
+# dim(itd) #249 patients 
+head(itd[,1:5])
+```
+
+
+```{r}
+armC <- read.csv("AAML1031_ArmC_10.17.2017.csv", stringsAsFactors = FALSE)
+# dim(armC) #85 patietns
+head(armC)
+```
+
+
+```{r}
+centralPathology <- read.csv("AAML1031CentralPathologyRevie-3.csv", stringsAsFactors = FALSE)
+# dim(centralPathology) #1991 patients with duplicates!! 
+head(centralPathology[,1:5])
+```
+
+
+```{r}
+nup <- read.csv("1031 FLT3 ITD+ NUP98NSD1_QPCR_results as of 062316.csv", 
+                stringsAsFactors = FALSE, 
+                na.strings = c("","No Data"))
+
+nup <- nup %>%
+  mutate(NUP98.NSD1_qPCR=tolower(ifelse(is.na(NUP98.NSD1.result), "unknown", NUP98.NSD1.result))) 
+
+# dim(nup)# 195
+head(nup)
+```
+
+
+```{r}
+DEK.0531 <- read.csv("0531_DEK_NUP214_positives.csv", stringsAsFactors = FALSE)
+head(DEK.0531)
+```
+
+
+
+#Read in the CDE 
+
+The CDE 1031 has discrepant Arm information for patients in Arm C... This could be due to patietn switching Arms after enrollment? Check with Rhonda that is not a merge error. 
+
+CDE 1031: ~/reference_mapping-files/TARGET_AML_AAML1031_merged_CDE_Cleaned_28Sept2017.csv
+
+```{r}
+CDE.0531 <- read.csv("~/reference_mapping-files/TARGET_AML_current_asof_june30_2016_UPDATED_RhondaEdit_2017.06.08.csv", row.names = 1, na.strings = c("N/A"), stringsAsFactors = FALSE)
+head(CDE.0531[,1:5])
+```
+
+
+
+#Clean up the Data 
+
+NOTE: Must make a better filter for dups... there are some which switch from N to P for some 
+abnormalities. 
+
+```{r}
+pathology.clean <-  centralPathology %>%
+  mutate(t.8.21=mergeMolCols(t.8.21.., Abnormal.Karyotype..t.8.21..),
+         inv.16.16_t.16.16=mergeMolCols(Inv.16..t.16.16.., Abnormal.Karyotype.Inv.16.t.16.16.),
+         abnormal_11.q.23=mergeMolCols(X11q23.abnormality., Abnormal.Karyotype.11q23.abnormality.)) %>%
+  select(Patient.ID, t.8.21, inv.16.16_t.16.16,Karyotype) %>% 
+  filter(! duplicated(Patient.ID)) %>%
+  set_rownames(.$Patient.ID)
+
+# pathology.clean[,c("t.8.21", "inv.16.16_t.16.16","abnormal_11.q.23")]
+head(pathology.clean)
+# dim(pathology.clean)
+```
+
+```{r}
+# write.csv(pathology.clean,"TARGET_AML_1031_ClinicalPathology_t.8.21_inv.16.16.csv", row.names = FALSE)
+```
+
+
+NOTE: These clinical pathology data are the same information in Emilia's CDE and these have tons of duplicate entries. So for the sake of this analysis, since Im using only two columns that are identical entries for both patient IDs, I will just select the first entry. 
+
+Next,I will need to run this mergeMolCols on CDE.1031 from Emilia, to clean that up more, but for this application I will not use Emilias data.  
+
+
+```{r}
+outlier <- "847394" #this outlier was given sorafinib, but is in arm B with low AR. 
+
+f <- "%m/%d/%Y" #format for date conversions
+
+#function to change dot to NA
+dot2NA <- function(col){
+  ifelse(grepl("^\\.$|#", col), NA, col)
+}
+
+#function to change character to numeric
+char2Num <- function(col){
+  as.numeric(as.character(col))
+}
+
+#function to fill in missign values
+fillMaxTime <- function(col){
+  col <- as.numeric(col) #days column
+  ifelse(is.na(col), max(col, na.rm=TRUE), col)
+}
+
+
+ITD.clean <- itd %>%
+  filter(Treatment.Arm != "Arm D") %>%  #remove all Arm D becuase they were not followed-up
+  select(everything(),NUP98.NSD1_RNAseq = NUP98.NSD1 ) %>% #rename NUP98.NSD1 to indicate its source of detection
+  
+  #Clean up the mutation information. 
+  mutate(Group=rep("AML", nrow(.)),
+         FLT3ITD.Status=ifelse(grepl("high",FLT3.ITD.status), "high", "low"),
+         NPM1=ifelse(grepl("0|#|not", NPM1), "unknown",NPM1),
+         CEBPA=ifelse(grepl("0|#|not", CEBPA), "unknown", CEBPA),
+         NUP98.NSD1_RNAseq = ifelse(NUP98.NSD1_RNAseq == "not tested", "unknown",NUP98.NSD1_RNAseq)) %>%
+
+  #Merge with Nup98-NSD1 data from Tiffany from QPCR
+  left_join(., nup, by=c("Patient.registration.number"="Pt.ID")) %>%
+  mutate(NUP98.NSD1=NupStatus(.)) %>%
+  
+  #Merge with Clinical Pathology data for CBF-AML information and ArmC with SCT data
+  left_join(., pathology.clean, by=c("Patient.registration.number"="Patient.ID")) %>%
+  left_join(.,armC, by=c("Patient.registration.number"="Pt.ID")) %>%
+  mutate(SCT.Yes.No=ifelse(nchar(SCT.Start) < 1 | is.na(SCT.Start), "No", "Yes")) %>%
+  
+  #Clean up Sorafinib to be numeric and define dosage groups 
+  mutate(Sorafinib.InductionI=as.numeric(as.character(ifelse(Total.Dose..mg..of.Sorafenib.for.Induction.I..Sorafenib. == ".", 
+                                                             NA, Total.Dose..mg..of.Sorafenib.for.Induction.I..Sorafenib.)))) %>%
+  mutate(dosageAR.Groups=dar(.),
+         NSD1.with.Sora = paste(dosageAR.Groups, NUP98.NSD1, sep="."),
+         SorafinibGroups.InductionI=ifelse((is.na(Sorafinib.InductionI)), "Not Administered", ifelse(Sorafinib.InductionI >= 1000, "> 1000 mg", "< 1000 mg"))) %>%
+
+  #Clean up the WBC and MRD to be numeric for CDE tables
+  mutate(WBC..x10.3.uL=char2Num(dot2NA(WBC..x10.3.MicroLiter..at.study.entry)),
+         Bone.marrow.blast.percent.at.study.entry=char2Num(dot2NA(Bone.marrow.leukemic.blast.percentage.....at.study.entry)),
+         Perc.MRD.End.of.Induction.1=char2Num(dot2NA(X.MRD.End.of.Induction.1)),
+         Perc.MRD.End.of.Induction.2=char2Num(dot2NA(X.MRD.End.of.Induction.2)),
+         MRD.EOI1=ifelse(Perc.MRD.End.of.Induction.1 > 0, "positive", "negative"),
+         MRD.EOI2=ifelse(Perc.MRD.End.of.Induction.2 > 0, "positive", "negative")) %>%
+
+  #Change the Dates columns to date class 
+  mutate(Date.of.first.relapse=as.Date(dot2NA(Date.of.first.relapse), format = f),
+         Date.of.enrollment=as.Date(Date.of.enrollment, format = f),
+         Induction.1.failure.date=as.Date(dot2NA(Induction.1.failure.date), format = f),
+         Induction.2.failure.date=as.Date(dot2NA(Induction.2.failure.date), format = f)) %>%
+  
+  #Define the time from date of enrollment to date of event
+  mutate(Date.of.First.Event=DateOFEvent(.),
+         Days.to.Relapse=as.numeric(Date.of.first.relapse - Date.of.enrollment),
+         Days.to.First.Event=as.numeric(Date.of.First.Event - Date.of.enrollment)) %>%
+
+  #Update missing time points and create binary event columns 
+  mutate(Days.to.First.Event=fillMaxTime(Days.to.First.Event),
+         Days.to.Relapse=fillMaxTime(Days.to.Relapse),
+         First.Relapse=ifelse(is.na(Date.of.first.relapse), 0, 1),
+         First.Event=ifelse(is.na(Date.of.First.Event), 0, 1)) %>%
+  
+  #Add Combined Mutation Columns
+  mutate(T.Arms=ifelse(Treatment.Arm == "Arm C", "ArmC", "ArmA_B")) %>%
+  rowwise() %>%
+  mutate(MutGrps3=mutationGroup(NPM1, CEBPA, NUP98.NSD1),
+         MutGrps4=mutationGroup(NPM1, CEBPA, NUP98.NSD1, CBF=TRUE, inv.16.16_t.16.16, t.8.21)) 
+
+  
+  #remove the outlier and set rownames
+class(ITD.clean) <- "data.frame" #must change class because rowwise makes this a "tibble" whcih cannot set rownames
+ITD.clean <- ITD.clean %>%
+  filter(Patient.registration.number != outlier) %>%
+  set_rownames(.$Patient.registration.number)
+
+
+ord <- c("Group", "FLT3ITD.Status", "Sorafinib.InductionI","dosageAR.Groups","SorafinibGroups.InductionI", "Date.of.enrollment", "Date.of.first.relapse", "Induction.1.failure.date","Induction.2.failure.date", "Days.to.First.Event", "Days.to.Relapse", "First.Event", "First.Relapse", "NUP98.NSD1_RNAseq", "NPM1", "CEBPA", "NSD1.with.Sora", "t.8.21", "inv.16.16_t.16.16","MutGrps3", "MutGrps4", "MRD.EOI1", "MRD.EOI2", "Bone.marrow.blast.percent.at.study.entry", "WBC..x10.3.uL" )
+
+
+head(ITD.clean[,ord])
+# dim(ITD.clean) #210 patietns
+# head(ITD.clean)
+```
+
+Note: For Days.To.Relapse, since I dont have information on the date of last follow-up, I need to be able to come up with a "dummy" timepoint for 
+patients who didnt relapse. I will use this as the maximum number of days that a patient relapsed after enrollement (1,133 Days). 
+
+
+```{r}
+# write.csv(ITD.clean, "ITDpos_Cleaned_withMolecularAdded_10.24.2017.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+CDE.0531clean <- CDE.0531 %>%
+  filter(!is.na(FLT3.ITD.allelic.ratio)) %>%
+  mutate(FLT3.ITD.Status= ifelse(FLT3.ITD.allelic.ratio > 0.4, "high", "low"),
+         DEK.NUP14=ifelse(Reg. %in% DEK.0531$Reg., "Positive", "otherAML"),
+         NUP98.NSD1=ifelse(grepl("NUP98-NSD1", Reason), "Positive", "otherAML")) %>%
+  rowwise() %>%
+  mutate(MutGrps3=mutationGroup(NPM.mutation, CEBPA.mutation, NUP98.NSD1),
+         MutGrps4=mutationGroup(NPM.mutation, CEBPA.mutation, NUP98.NSD1, CBF=TRUE, inv.16., t.8.21.)) 
+  
+class(CDE.0531clean) <- "data.frame" 
+rownames(CDE.0531clean) <- CDE.0531clean$TARGET.USI.1
+
+CDE.0531clean[,c("FLT3.ITD.allelic.ratio", "FLT3.ITD.Status", "DEK.NUP14","NUP98.NSD1", "CEBPA.mutation", "NPM.mutation", "MutGrps3", "MutGrps4")]
+```
+
+
+```{r}
+# write.csv(CDE.0531clean, "ITDpos_0531_cleaned_10.23.17")
+```
+
+
+
+#Check out the complete information needed here
+
+
+```{r results='asis'}
+kable(table(ITD.clean$Treatment.Arm, ITD.clean$FLT3.ITD.status), format = "html", align = c( "c"), caption = "Table 1: Arms of 1031")
+```
+
+
+```{r results='asis'}
+kable(table(CDE.ITDclean$Treatment.Arm.y, CDE.ITDclean$FLT3.ITD.status), format = "html", align = c("c"), caption = "Table 2: Arms of 1031 in Merged CDE")
+```
+
+
+```{r results='asis'}
+kable(table(as.factor(CDE.0531clean$Protocol), CDE.0531clean$FLT3.ITD.Status), format = "html", align = "c", caption = "Table 3: FLT3 ITD Allelic Ratio Groups")
+```
+
+
+```{r results='asis'}
+kable(table(ITD.clean$Treatment.Arm, ITD.clean$NUP98.NSD1), format = "html", align = "c", caption = "Table 4: NUP98-NSD1 Mutations in AAML1031")
+```
+
+
+```{r}
+kable(table(ITD.clean$t.8.21, ITD.clean$Treatment.Arm),format = "html", align = "c", caption = "Table 5: T(8;21) Mutations in AAML1031")
+```
+
+```{r}
+kable(table(ITD.clean$inv.16.16_t.16.16, ITD.clean$Treatment.Arm), format = "html", align = "c", caption = "Table 6: Inv(16;16) Mutations in AAML1031")
+```
+
+
+#Perform Time to Relapse on Merged Data for 1031
+
+
+```{r message=FALSE}
+HivsLowAR <- KM.plots(df=CDE.ITDclean,
+                      groupBy = "Group", 
+                      type="Relapse", 
+                      covariate = "FLT3ITD.Status",
+                      cohort = "1031")
+# HivsLowAR$Relapse
+HivsLowAR$Failure
+```
+
+
+
+There is no difference in relapse in only FLT3-ITD?? This begins to make sense when you look at survival for all 4 arms. 
+
+Cannot do EFS or OS due to the fact that only 44/233 have efs or os information and ALL 44 are in the same group (ITD Low AR). Also, CDE for 1031 has only Arms A,B,D. Arm C is the one with the sorafinib (FLT3 inhibitor) given. 
+
+High AR does better than low AR when removing Arm D. This appears to indicated that either Sorafinib is very effective since it accounts for 68% of all High AR in this dataset. Or possibly ArmA and ArmB High AR recieved stem cell transplant. 
+
+
+#Time to Relapse with FLT3 with 249 Patients
+
+```{r}
+all.itd <- KM.plots(df=ITD.clean, 
+                         groupBy = "Group", 
+                         type="Relapse", 
+                         covariate = "FLT3ITD.Status",
+                         cohort = "1031")
+# all.itd$Relapse
+all.itd$Failure
+```
+
+
+#Compare Arm C High and Low AR
+
+Cannot use only ArmC Hi vs Low because there is only high AR in this subset. See table 1 above. 
+
+
+#Compare ArmC to all other Arms
+
+```{r}
+ITD.Hi <- ITD.clean %>% 
+  mutate(FLT3.ArmGroups=paste(Treatment.Arm, FLT3ITD.Status, sep=".")) %>%
+  mutate(ArmCvsOtherArms=ifelse(FLT3.ArmGroups == "Arm C.high", "Arm C, HighAR", "ArmAB_Comb"))
+  
+armCvsOthers <- KM.plots(ITD.Hi,
+                         groupBy = "Group",
+                         type = "Relapse",
+                         covariate = "ArmCvsOtherArms",
+                         cohort="1031")
+
+
+# armCvsOthers$Relapse
+armCvsOthers$Failure
+```
+
+
+```{r}
+ITD.Hi_only <- ITD.Hi %>%
+  filter(FLT3ITD.Status == "high") %>%
+  mutate(ArmCvsOtherArms=ifelse(ArmCvsOtherArms == "ArmAB_Comb", "ArmAB_Comb, HighAR", ArmCvsOtherArms))
+
+
+armCvsOthersHi <- KM.plots(ITD.Hi_only, 
+                           groupBy = "Group",
+                           type="Relapse",
+                           covariate = "ArmCvsOtherArms",
+                           cohort="1031")
+
+# armCvsOthersHi$Relapse
+armCvsOthersHi$Failure
+```
+
+
+```{r}
+arm.relapse <- KM.plots(ITD.clean, 
+                        groupBy= "Group", 
+                        type="Relapse", 
+                        covariate = "Treatment.Arm",
+                        cohort="1031")
+
+# arm.relapse$Relapse
+arm.relapse$Failure
+```
+
+
+Arm D did the best, but almost all are Low AR (36/38). Arm C did the next best, which was 100% High AR. 
+ArmA and ArmB did the worst, with relapse and had a majority of low AR in each arm with ~60% low AR and 30% high AR. 
+
+```{r}
+arm.RL.AR <- KM.plots(ITD.clean, 
+                      groupBy = "FLT3ITD.Status",
+                      type="Relapse",
+                      covariate = "Treatment.Arm",
+                      cohort = "1031")
+arm.RL.AR$Failure
+```
+
+
+#ArmC Dosage Groups vs All Other High AR vs All Other Low AR 
+
+```{r}
+ITD.Sora <- KM.plots(ITD.clean,
+                     groupBy = "Group",
+                     type="Relapse", 
+                     covariate = "dosageAR.Groups",
+                     cohort = "1031")
+
+
+# ITD.Sora$Relapse
+ITD.Sora$Failure
+```
+
+
+```{r}
+idx <- grepl("^Sora", ITD.clean$dosageAR.Groups)
+Sora.ArmC <- KM.plots(ITD.clean[idx,],
+                      groupBy = "Group", 
+                      type="Relapse", 
+                      covariate = "dosageAR.Groups",
+                      cohort = "1031")
+# Sora.ArmC$Relapse
+Sora.ArmC$Failure
+
+```
+
+
+#Compare the low and high AR in Arms A, B and D
+
+```{r}
+arms <- ITD.clean %>% 
+  filter(grepl("Arm A|Arm B", Treatment.Arm))
+
+arm.AR <- KM.plots(arms, 
+                   groupBy = "Treatment.Arm",
+                   type="Relapse", 
+                   covariate = "FLT3ITD.Status",
+                   cohort = "1031")
+
+# arm.AR$Relapse
+arm.AR$Failure
+```
+
+Again, not much difference in the Hi vs Low even in the arms for relapse. 
+
+
+#Compare the FLT3 + NUP98-NSD1 Mutants 
+
+```{r}
+table(ITD.clean$NSD1.with.Sora)
+```
+
+
+```{r}
+# NSD1 <- ITD.clean %>% 
+#   filter(NUP98.NSD1 != "unknown") %>%
+#   mutate(ITD.NSD1=ifelse(grepl("negative", NUP98.NSD1), "ITD+,NSD1-", "ITD+,NSD1+"),
+#          ITD.NSD1.Sora=catSoraGroups(NSD1.with.Sora))
+
+NSD1 <- ITD.clean %>%
+  mutate(ITD.NSD1=ifelse(grepl("positive", NUP98.NSD1), "FLT3-ITD+, NUP98-NSD1+", "FLT3-ITD+"),
+         ITD.NSD1.Arms=paste(ITD.NSD1, T.Arms, sep="."),
+         ITD.NSD1.Arms=ifelse(grepl("ArmA_B", ITD.NSD1.Arms), 
+                              gsub("\\.ArmA_B", ", No Sorafinib",ITD.NSD1.Arms), 
+                              gsub("\\.ArmC", ", Sorafinib",ITD.NSD1.Arms )),
+         ITD.NSD1.Sora=catSoraGroups(NSD1.with.Sora))
+```
+
+
+```{r}
+#Compare All FLT-ITD+ with NUP98-NSD1 status (pos or neg). 
+FLT3vNSD1 <- KM.plots(NSD1,
+                      groupBy = "Group",
+                      type="Relapse",
+                      covariate = "ITD.NSD1",
+                      cohort= "1031")
+
+# FLT3vNSD1$Relapse
+FLT3vNSD1$Failure
+```
+
+
+```{r}
+#Compare FLT-ITD+ high and low AR with NUP98-NSD1 status (pos or neg). Remove not tested samples
+FLT3ARvNSD1 <- KM.plots(NSD1, 
+                      groupBy = "FLT3ITD.Status", 
+                      type="Relapse", 
+                      covariate = "NUP98.NSD1", 
+                      cohort = "1031")
+
+# FLT3ARvNSD1$Relapse
+FLT3ARvNSD1$Failure
+```
+ 
+ 
+```{r}
+table(NSD1$ITD.NSD1, NSD1$T.Arms)
+```
+
+```{r}
+#Examine FLT3-ITD in ArmC based on NUP98-NSD1 (pos or neg). 
+armCvsNSD1 <- KM.plots(NSD1,
+                       groupBy = "T.Arms",
+                       type="Relapse",
+                       covariate="ITD.NSD1",
+                       cohort = "1031")
+# armCvsNSD1$Relapse
+armCvsNSD1$Failure
+# saveMultiPlots(armCvsNSD1, "Failure")
+```
+
+```{r}
+table(NSD1$ITD.NSD1.Arms)
+```
+
+
+```{r}
+armsVsNSD1 <- KM.plots(NSD1,
+                       groupBy = "Group",
+                       type="Relapse",
+                       covariate = "ITD.NSD1.Arms",
+                       cohort = "1031")
+
+armsVsNSD1$Failure
+# saveMultiPlots(armsVsNSD1, "Failure")
+```
+
+
+#Cox Multivariate model with SCT 
+
+
+```{r}
+table(subset(NSD1, T.Arms == "ArmC")$ITD.NSD1, subset(NSD1, T.Arms == "ArmC")$SCT.Yes.No)
+```
+
+
+```{r}
+cph <- coxph(Surv(Days.to.First.Event/365.25, First.Event) ~ 
+               WBC..x10.3.uL +
+               Bone.marrow.blast.percent.at.study.entry + 
+               ITD.NSD1 + 
+               SCT.Yes.No,
+             data = subset(NSD1, T.Arms == "ArmC"))
+
+cph.test <- cox.zph(cph) #No violations to ph assumption. 
+summary(cph)
+```
+
+
+```{r}
+phTab <- coxSummaryTable(cph) %>%
+  set_rownames(c("WBC (x10^3 uL)","Blast % at Study Entry", "FLT3-ITD+, NUP98-NSD1+", "SCT.Yes"))
+
+phTab
+```
+
+```{r}
+# write.csv(phTab,"TARGET_AML_1031_CoxPH_withSCT.csv")
+```
+
+
+
+
+
+
+#Investigate Difference of ITD-NSD1 with Sorafinib Exposure
+
+```{r}
+table(NSD1$ITD.NSD1.Sora, NSD1$Treatment.Arm)
+```
+
+
+```{r}
+ soraVsNSD1 <- KM.plots(NSD1, 
+                       groupBy = "NUP98.NSD1",
+                       type = "Relapse",
+                       covariate = "ITD.NSD1.Sora",
+                       cohort = "1031")
+
+# soraVsNSD1$Relapse
+soraVsNSD1$Failure
+```
+
+
+```{r}
+table(NSD1$ITD.NSD1.Sora, NSD1$SorafinibGroups.InductionI)
+```
+
+
+#sanity Check on the NUP98-NSD1 Negative vs Sorafinib Treatment. 
+
+```{r}
+t <- subset(NSD1,SorafinibGroups.InductionI != "Not Administered")
+
+t2 <- KM.plots(t, 
+               groupBy = "NUP98.NSD1",
+               type="Relapse",
+               covariate = "SorafinibGroups.InductionI",
+               cohort="1031")
+
+t2$Failure
+```
+
+This shows that the 42 Sora, NSD1- patients have some good and some unfavorable outcomes due to differences  in dosage. The "average" profile therefore has survival around the 70% mark, eventhough higher dosage has survival of ~85%, the low dosage has suvival ~55%. 
+
+The ArmA and ArmB NoSora groups always had an "average" survival of ~55%-60%. So now there is smaller difference with such few Sora, NSD1- comparators. 
+
+Included more patients from Tiffany for NUP98-NSD1 patient IDs that may overlap with the dataset. These  NUP98-NSD1 were originally identified w/ RNA-seq only. 
+
+
+#Compare FLT3-ITD with NPM1 or CEBPA Mutations
+
+```{r}
+table(ITD.clean$FLT3.ITD.status, ITD.clean$NPM1)
+table(ITD.clean$FLT3.ITD.status, ITD.clean$CEBPA)
+
+table(ITD.clean$Treatment.Arm, ITD.clean$NPM1)
+table(ITD.clean$Treatment.Arm, ITD.clean$CEBPA)
+```
+
+
+```{r}
+idx <- ITD.clean$NPM1 != "unknown"
+
+FLT3vsNPM1 <- KM.plots(ITD.clean[idx,], 
+                       groupBy = "Group", 
+                       type="Relapse", 
+                       covariate = "NPM1",
+                       cohort="1031") 
+
+# FLT3vsNPM1$Relapse
+FLT3vsNPM1$Failure
+```
+
+
+```{r}
+idx <- ITD.clean$NPM1 != "unknown"
+
+Arm.FLT3vsNPM1 <- KM.plots(ITD.clean[idx,], 
+                       groupBy = "Treatment.Arm", 
+                       type="Relapse", 
+                       covariate = "NPM1",
+                       cohort="1031") 
+
+# FLT3vsNPM1$Relapse
+Arm.FLT3vsNPM1$Failure
+```
+
+
+```{r}
+id <- ITD.clean$CEBPA != "unknown" 
+FLT3vsCEBPA <- KM.plots(df=ITD.clean[id,], 
+                        groupBy = "Group",
+                        type = "Relapse",
+                        covariate = "CEBPA", 
+                        cohort = "1031")
+
+# FLT3vsCEBPA$Relapse
+FLT3vsCEBPA$Failure
+```
+
+
+```{r}
+Arm.FLT3vsCEBPA <- KM.plots(df=ITD.clean[id,], 
+                        groupBy = "Treatment.Arm",
+                        type = "Relapse",
+                        covariate = "CEBPA", 
+                        cohort = "1031")
+
+# Arm.FLT3vsCEBPA$Relapse
+Arm.FLT3vsCEBPA$Failure
+```
+
+
+```{r message=FALSE}
+noNSD1 <- ITD.clean$MutGrps3 != "NUP98-NSD1, FLT3-ITD" #& ITD.clean$T.Arms == "ArmC"
+
+
+
+NPM1_CEBPA <- KM.plots(df=ITD.clean[noNSD1, ],
+                       groupBy = "T.Arms",
+                       type="Relapse",
+                       covariate = "MutGrps3",
+                       cohort="1031")
+
+
+NPM1_CEBPA$Failure
+# saveMultiPlots(NPM1_CEBPA,"Failure")
+```
+
+
+
+#Create Composite Figures with most pertinent information
+
+```{r}
+table(ITD.clean$MutGrps3, ITD.clean$Treatment.Arm)
+```
+
+```{r}
+table(ITD.clean$MutGrps4, ITD.clean$FLT3ITD.Status)
+```
+
+
+
+
+
+
+```{r}
+MutGrps3 <- KM.plots(df=ITD.clean, 
+                     groupBy = "Group", 
+                     type="Relapse",
+                     covariate = "MutGrps3", 
+                     cohort="1031")
+
+MutGrps$Failure
+# ggsave(filename = "CEBPA_NPM1_NSD1_FLT3ITD_KMplot.tiff",plot=MutGrps$Failure[[1]],device = "tiff",width = 9, height = 5, dpi=300)
+```
+
+
+```{r message=FALSE}
+MutGrps3_byArm <- KM.plots(df=ITD.clean,
+                           groupBy = "T.Arms", 
+                           type = "Relapse", 
+                           covariate = "MutGrps3",
+                           cohort = "1031")
+
+
+
+MutGrps_byArm$Failure
+# saveMultiPlots(MutGrps3_byArm, col="Failure")
+```
+
+
+```{r}
+MutGrps4 <- KM.plots(df=ITD.clean,
+                     groupBy = "Group",
+                     type="Relapse",
+                     covariate = "MutGrps4",
+                     cohort="1031")
+MutGrps4$Failure
+
+# ggsave(file="CEBPA_NPM1_NSD1_CBF_FLT3-ITD_KMplots.tiff", plot=MutGrps4$Failure[[1]], device = "tiff", width=9, height = 5, dpi=300)
+```
+
+
+
+```{r}
+MutGrps4_byArm <- KM.plots(df=ITD.clean,
+                           groupBy = "T.Arms",
+                           type = "Relapse",
+                           covariate="MutGrps4",
+                           cohort="1031")
+
+MutGrps4_byArm$Failure
+# saveMultiPlots(MutGrps4_byArm, "Failure")
+```
+
+
+
+#AAML0531 Time to Relapse, OS and EFS
+
+
+Will remove SCT in first CR since this will alter the number of events a patient might have. 
+
+```{r}
+rmSCT <- CDE.0531clean %>% 
+  filter(SCT.in.1st.CR != "Yes")
+
+dim(rmSCT)
+```
+
+
+```{r}
+hiVsLowAR <- KM.plots(rmSCT, 
+                 groupBy = "X",
+                 type="OS", 
+                 covariate="FLT3.ITD.Status",
+                 cohort = "0531")
+hiVsLowAR$OS
+hiVsLowAR$EFS
+```
+
+
+```{r}
+withSCT <- KM.plots(CDE.0531clean, 
+                  groupBy = "X",
+                 type="OS", 
+                 covariate="FLT3.ITD.Status",
+                 cohort = "0531")
+
+# pdf("OS_withSCT_0531.pdf" )
+withSCT$OS
+# dev.off()
+```
+
+
+```{r}
+mutGrps3.0531 <- KM.plots(df=CDE.0531clean, 
+                          groupBy = "X",
+                          type="OS",
+                          covariate = "MutGrps3",
+                          cohort = "0531")
+
+mutGrps3.0531$OS
+mutGrps3.0531$EFS
+
+# saveMultiPlots(mutGrps3.0531, "OS")
+# saveMultiPlots(mutGrps3.0531, "EFS")
+```
+
+
+
+```{r}
+table(CDE.0531clean$MutGrps3, CDE.0531clean$FLT3.ITD.Status)
+table(CDE.0531clean$MutGrps4)
+```
+
+
+
+```{r}
+mutGrps3.byFLT3 <- KM.plots(df=CDE.0531clean, 
+                            groupBy = "FLT3.ITD.Status",
+                            type="OS",
+                            covariate = "MutGrps3",
+                            cohort="0531")
+
+mutGrps3.byFLT3$OS
+mutGrps3.byFLT3$EFS
+# saveMultiPlots(mutGrps3.byFLT3, "OS")
+# saveMultiPlots(mutGrps3.byFLT3, "EFS")
+
+```
+
+
+```{r}
+mutGrps4.0531 <- KM.plots(df=CDE.0531clean,
+                          groupBy = "X",
+                          type="OS",
+                          covariate = "MutGrps4",
+                          cohort = "0531")
+mutGrps4.0531$OS
+mutGrps4.0531$EFS
+
+# saveMultiPlots(mutGrps4.0531, "OS")
+# saveMultiPlots(mutGrps4.0531, "EFS")
+
+```
+
+
+```{r}
+mutGrps4.byFLT3 <- KM.plots(df=CDE.0531clean,
+                          groupBy = "FLT3.ITD.Status",
+                          type="OS",
+                          covariate = "MutGrps4",
+                          cohort = "0531")
+mutGrps4.byFLT3$OS
+mutGrps4.byFLT3$EFS
+
+# saveMultiPlots(mutGrps4.byFLT3, "OS")
+# saveMultiPlots(mutGrps4.byFLT3, "EFS")
+```
+
+
+
+# Compare all FLT3-ITD to All other AML 
+
+Sanity check for code. Due to the fact that before SCT removal, it was suprising to see no change in FLT3-HighAR vs FLT3-LowAR
+
+```{r}
+FLT3 <- KM.plots(CDE.0531, 
+                 groupBy = "Study", 
+                 type = "OS", 
+                 covariate =  "FLT3.ITD.positive.",
+                 cohort = "0531")
+
+FLT3$OS
+FLT3$EFS
+```
+
+
+
+
+
+
+
+
+
+
+
+#Clinical Characteristic Tables
+
+```{r message=FALSE}
+library(compareGroups)
+
+# colnames(ITD.clean)
+```
+
+
+```{r}
+cols <- c("Treatment.Arm", "FLT3.ITD.status","Bone.marrow.blast.percent.at.study.entry", "WBC..x10.3.uL" ,"CEBPA", "NUP98.NSD1","NPM1","MRD.EOI1","MRD.EOI2","SorafinibGroups.InductionI", "Induction.1.response", "Response.by.end.of.Ind.II")
+
+# lapply(ITD.clean[,cols], unique)
+```
+
+
+
+```{r}
+c <- compareGroups(FLT3.ITD.status ~ .,
+                   method=4,
+                   Q1=0,
+                   Q3=1,
+                   bivar=TRUE, 
+                   ref.y="ITD low AR (<=0.4)",
+                   data=ITD.clean[,cols])
+```
+
+
+```{r}
+tab <- createTable(c, show.n=TRUE, show.all = TRUE, show.p.mul = TRUE)
+tab
+```
+
+
+```{r}
+export2csv(tab, "TARGET_AML_AAML1031_CDE_Table_HighVsLow_AllelicRatio.csv")
+```
+
+
+```{r}
+c2 <- compareGroups(Treatment.Arm ~ .,
+                   method=4,
+                   Q1=0,
+                   Q3=1,
+                   bivar=TRUE, 
+                   ref.y="ITD low AR (<=0.4)",
+                   data=ITD.clean[,cols])
+```
+
+
+```{r}
+tab2 <- createTable(c2, show.n=TRUE, show.all = TRUE, show.p.mul = TRUE)
+# tab2
+```
+
+
+```{r}
+# export2csv(tab2, "TARGET_AML_AAML1031_ClinicalCharacteristics_Table.csv")
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+

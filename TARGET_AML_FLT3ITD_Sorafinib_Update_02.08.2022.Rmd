@@ -1,0 +1,262 @@
+---
+title: "FLT3-ITD response to sorafinib"
+author: "Jenny Smith"
+date: ""
+output: html_document
+---
+
+
+# Set-up 
+
+```{r setup, cache = FALSE, include = FALSE}
+require(knitr)
+knitr::opts_knit$set(root.dir = file.path(TARGET,"Clinical/analysis/2017.10.01_Flt3ITD_Sorafinib"))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+
+library(DeGSEA)
+library(REDCapR)
+# library(keyring) #cannot install non-zero exit 
+
+getwd()
+```
+
+
+# ClinData
+
+```{r message=FALSE}
+#https://cran.r-project.org/web/packages/REDCapR/vignettes/workflow-read.html 
+project <- "FLT3-ITD_with_Fusions_Sorafinib_Response"
+
+if(project==""){
+  stop("Must include Projecy name!")
+}else{
+  message(paste0("Project is: ",project))
+  current_cde_database <- paste("TARGET_AML_CDEs_For_Project",project, ".RDS", sep="_")
+  
+  if(file.exists(current_cde_database)){
+    print("Reading CDEs from Rdata object.")
+    merged <- readRDS(current_cde_database)
+      
+  }else{
+    print("Downloading CDEs from RedCap API.")
+    path_credential <- file.path(HOME,".redcap")
+    project_id <- 1295
+  
+    credential  <- REDCapR::retrieve_credential_local(
+      path_credential = path_credential,
+      project_id = project_id)
+    
+    #takes about 30 sec to download. 
+    merged <- redcap_read(redcap_uri = credential$redcap_uri, 
+                          token = credential$token, 
+                          raw_or_label_headers = 'label')
+    if(merged$success){
+      merged <- data.frame(merged$data, check.names=TRUE) #remove the white spaces  (will this even work??)
+      saveRDS(merged, current_cde_database)
+    }
+    
+    fname_c <- ifelse(length(ls(pattern = "_cts_file")) == 0,"None" ,basename(get(ls(pattern = "_cts_file"))))
+    fname_t <- ifelse(length(basename(ls(pattern = "_TPM_file"))) == 0,"None", basename(get(ls(pattern = "_TPM_file"))))
+    
+    #Create a simple log file from the day the project starts
+    cat(c(paste("Date:", Sys.Date()),
+          paste("cts:", fname_c),
+          paste("tpm:", fname_t), 
+          paste("CDE:", current_cde_database)),
+          sep = "\n", 
+          file = paste(project, Sys.Date(), ".log", sep="_"))
+    
+  }
+  
+  #keep a list of the ineligable patiens to remove if necessary
+  inelig <- merged %>% 
+    filter(Eligibility.Comments == "remove") %>% 
+    pull(USI)
+  
+  #Filter those with USIs and are eligible for the study
+  merged <- merged %>% 
+    filter(Eligibility.Comments != "remove")
+  
+  
+  dim(merged) 
+  head(merged)
+
+}
+```
+
+
+```{r}
+sample_info <- read.csv(file.path(TARGET, "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv")) 
+
+dim(sample_info)
+```
+
+```{r}
+regs <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv")) %>% 
+  select(Reg., USI)
+```
+
+
+```{r}
+sorafinib_data <- read.csv("AAML1031_ArmC_10.17.2017.csv") %>% 
+  mutate(Pt.ID=as.character(Pt.ID)) %>% 
+  left_join(., regs, by=c("Pt.ID"="Reg.")) %>% 
+  left_join(., select(merged,Primary.Fusion,FLT3.ITD.positive., USI),
+            by="USI") %>% 
+  select(USI, Pt.ID, 
+         Primary.Fusion, FLT3.ITD.positive.,
+         everything())
+
+head(sorafinib_data)
+```
+
+
+# select Samples
+
+Do you already have an outcome curve created for AAML1031 patients treated with sorafenib (ITD pos) comparing NUP98-NSD1 and DEK-NUP214?  Soheil would like to include in his talk that essentially sorafenib doesn’t benefit these 2 ITD cohorts.  If not, could you create one?  Just 2 populations needed: ITD+ NSD1 (treated with sorafenib) compared to ITD+ DEK-NUP214 (treated with sorafenib) for OS.
+
+can you create one with all 6;9 patients regardless on arm c or not?
+
+```{r}
+table(merged$FLT3.ITD.positive.)
+```
+
+```{r}
+input_samples <- merged %>% 
+  filter(grepl("NSD1|DEK-NUP214", Primary.Fusion), 
+         grepl("Yes", FLT3.ITD.positive.)) %>% 
+  filter(Protocol=="AAML1031") %>% 
+    filter( grepl("DEK-NUP214", Primary.Fusion) | 
+              c(grepl("Arm C", Treatment.Arm) & Primary.Fusion == "NUP98-NSD1")) %>% 
+  rename_at(vars(c(Recoded.OS.ID, Recoded.Event.ID)),
+            ~c("OS.ID","Event.ID")) %>% 
+  filter(!is.na(EFS.time..days.))
+
+
+table(input_samples$EFS.event.type.ID)
+```
+
+```{r}
+input_samples %>% 
+  group_by(Primary.Fusion, FLT3.ITD.positive., Treatment.Arm) %>% 
+  dplyr::count() #only 3 DEK-NUP214 on the sorafinib arm?? 
+
+input_samples %>% 
+  group_by(Primary.Fusion, EFS.event.type.ID) %>% 
+  dplyr::count() #only 3 DEK-NUP214 on the sorafinib arm??
+```
+
+```{r}
+orig <- sorafinib_data %>% 
+        filter(grepl("NSD1|DEK-NUP214", Primary.Fusion), 
+               grepl("Yes", FLT3.ITD.positive.))
+
+
+table(orig$Primary.Fusion) #appears to be that way - even in the original dataset so unlikey any were lost to ineligibility, or other updates. 
+``` 
+
+```{r}
+aaml0531_samples <- merged %>% 
+  filter(grepl("NSD1|DEK-NUP214", Primary.Fusion), 
+         grepl("Yes", FLT3.ITD.positive.)) %>% 
+  filter(Protocol=="AAML0531") %>% 
+  # filter( grepl("DEK-NUP214", Primary.Fusion) | 
+  #             c(grepl("Arm C", Treatment.Arm) & Primary.Fusion == "NUP98-NSD1")) %>% 
+  rename_at(vars(c(Recoded.OS.ID, Recoded.Event.ID)),
+            ~c("OS.ID","Event.ID")) %>% 
+  filter(!is.na(EFS.time..days.))
+
+
+
+aaml0531_samples %>% 
+  group_by(Primary.Fusion,FLT3.ITD.positive., Treatment.Arm) %>% 
+  dplyr::count() #only 3 DEK-NUP214 on the sorafinib arm?? 
+
+aaml0531_samples %>% 
+  group_by(Primary.Fusion, EFS.event.type.ID) %>% 
+  dplyr::count() #only 3 DEK-NUP214 on the sorafinib arm??
+```
+
+# KM plots 
+
+```{r}
+source("~/home_drive/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/R/Survplot_Functions_2018.10.24.r")
+```
+
+
+```{r}
+NSD1_and_DEKs <- KM.plots(df=input_samples,
+                          group_vars = NULL,
+                          type = "OS", 
+                          covariate = "Primary.Fusion",cohort = "1031",
+                          cc = c("NUP98-NSD1"="red", "DEK-NUP214"="navy"))
+
+NSD1_and_DEKs
+```
+
+```{r}
+# pdf("TARGET_AML_Arm_C_NUP98.NSD1_and_Any_DEK.NUP214_OS_KMplot.pdf", height = 6, width = 6)
+grid.arrange(grobs=c(NSD1_and_DEKs$OS))
+# dev.off()
+
+# pdf("TARGET_AML_Arm_C_NUP98.NSD1_and_Any_DEK.NUP214_EFS_KMplot.pdf", height=6, width = 6)
+grid.arrange(grobs=c(NSD1_and_DEKs$EFS))
+# dev.off()
+```
+
+```{r}
+NSD1_and_DEKs_0531 <- KM.plots(df=aaml0531_samples,
+                          group_vars = NULL,
+                          type = "OS", 
+                          covariate = "Primary.Fusion",
+                          cohort = "1031",
+                          cc = c("NUP98-NSD1"="red", "DEK-NUP214"="navy"))
+
+NSD1_and_DEKs_0531
+```
+
+```{r}
+# pdf("TARGET_AAML0531_FLT3-ITD+_NUP98.NSD1_and_Any_FLT3-ITD+_DEK.NUP214_OS_KMplot.pdf", height = 6, width = 6)
+# grid.arrange(grobs=NSD1_and_DEKs_0531$OS)
+# dev.off()
+# 
+# pdf("TARGET_AAML0531_FLT3-ITD+_NUP98.NSD1_and_Any_FLT3-ITD+_DEK.NUP214_EFS_KMplot.pdf", height = 6, width = 6)
+# grid.arrange(grobs=NSD1_and_DEKs_0531$EFS)
+# dev.off()
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+

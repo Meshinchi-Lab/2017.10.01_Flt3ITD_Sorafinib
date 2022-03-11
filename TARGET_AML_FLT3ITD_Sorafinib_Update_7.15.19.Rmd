@@ -1,0 +1,411 @@
+---
+title: "Sorafinib FLT3-ITD Survival"
+author: "Jenny Smith"
+date: "June 18, 2019"
+output: html_document
+---
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 6, fig.width = 6)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/Clinical/analysis/2017.10.01_Flt3ITD_Sorafinib/')
+options(stringsAsFactors = FALSE)
+```
+
+
+```{r message=FALSE}
+library(magrittr)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(gridExtra)
+getwd()
+```
+
+```{r}
+source("~/scripts/survival_analysis/Survplot_Functions_2018.10.24.r")
+source("~/scripts/conversion_scripts/CDE_Cleaning_Utility_Functions.r")
+```
+
+
+#Define Functions to Be Used
+
+```{r}
+#https://stackoverflow.com/questions/21724212/set-r-to-include-missing-data-how-can-is-set-the-usena-ifany-option-for-t
+table = function (..., useNA = 'always') base::table(..., useNA = useNA)
+```
+
+
+#Read in the CDEs
+
+```{r}
+CDE.1031 <- read.csv("~/reference_mapping-files/AAML1031_TARGET_CDEs_with_HiAR_PrimaryCyto_and_FusionCalls_06.28.19.csv") %>% 
+  mutate(Reg.=as.character(Reg.)) %>% 
+  filter(!is.na(Recoded.OS.ID)) %>% 
+  rename(Event.ID=Recoded.EFS.ID, OS.ID=Recoded.OS.ID) %>% 
+  mutate(AML="AML",
+         NUP98.NSD1=ifelse(grepl("NUP98-NSD1",Fusion.Group), "Yes", "No" ))
+
+dim(CDE.1031)
+table(CDE.1031$NUP98.NSD1)
+```
+
+
+```{r}
+NSD1.1031 <- KM.plots(df=CDE.1031, #filter(ITD.data, WT1.mutation == "No" )
+                    "AML", 
+                    covariate = "NUP98.NSD1", 
+                    cohort = "1031")
+```
+
+```{r fig.width=11.5}
+grid.arrange(grobs=c(NSD1.1031$OS,NSD1.1031$EFS), ncol=2)
+```
+
+
+#Read in the ITD, and Sorafinib Dosage Information 
+
+```{r}
+files <- dir(pattern = "IND|INT")
+
+r1 <- function(x){gsub("Ind.I.|Ind.II.|Int.I.|Int.II.","", x)}
+r2 <- function(x){gsub("\\.Induction.I.|\\.Induction.II.|\\.Intensification.I.|\\.Intensification.II.", "", x)}
+
+armC <- lapply(files, function(x) read.csv(x, na.strings = ".") %>%
+                 mutate_all(as.character) %>%
+                 mutate(Dataset=gsub("^.+_(I.+I{1,2}).csv", "\\1", x)) %>%
+                 rename(Reg.=Patient.registration.number) %>%
+                 rename_at(vars(matches("Ind\\.|Int\\.", ignore.case = FALSE)),
+                           r1) %>% 
+                 rename_at(vars(matches("Induc|Intens", ignore.case = FALSE)),
+                           r2)) %>%
+  bind_rows() %>%
+  select(Reg.,Dataset, everything())
+
+head(armC)
+dim(armC) #257  57
+```
+
+```{r}
+table(armC$Dataset)
+```
+
+
+
+#Read in the Molecular Data 
+
+```{r}
+WT1 <- read.csv("1031 FLT3 ITD+ WT1 results 20190710.csv") %>% 
+  mutate(WT1.mutation=ifelse(grepl("Yes", WT1.Mutant...ex7.or.9.) | grepl("Yes", WT1.Exon.7.), "Yes", "No")) %>% 
+  filter(!WT1.Mutant...ex7.or.9. == "unknown" & !WT1.Exon.7. == "unknown") %>%
+  filter(!WT1.Mutant...ex7.or.9. == "unknown" | !WT1.Exon.7. == "unknown") %>% 
+  mutate(Reg.=as.character(Reg.No)) %>% 
+  select(Reg., everything(),-Reg.No)
+
+head(WT1)
+dim(WT1) #238   10
+```
+
+```{r}
+table(WT1$WT1.mutation)
+
+table(WT1$WT1.Mutant...ex7.or.9., WT1$WT1.Exon.7.)
+
+```
+
+```{r}
+AR <- read.csv("Copy of AAML1031_FLT3_ITD_less_than_0.1_AR.csv") %>% 
+  mutate(Reg.=as.character(Reg.))
+
+head(AR)
+dim(AR)
+```
+
+```{r}
+table(AR$Classified.AR, useNA="always")
+```
+
+
+#Clean and Organize the Datasets 
+
+```{r}
+armC.filter <- armC %>% 
+  select(Reg., Dataset, Treatment.Arm,   cohort, Did.patient.receive.the.indicated.agent.s...Sorafenib...,
+         Total.Dose=Total.Dose.of.Agents.Drugs.for.this.Cycle..) %>% 
+  mutate_at(vars(Total.Dose), as.numeric) %>% 
+  group_by(Reg.) %>%
+  mutate(TwoCoursesSora=case_when(
+          sum(Total.Dose > 0, na.rm = TRUE) >= 2 ~ "Yes", 
+          TRUE ~ "No"), 
+         Time_Point_Recieved_Sorafinib=collapseRows(col=Dataset)) %>%
+  
+  filter(TwoCoursesSora=="Yes") %>% #Only include patients with at least 2 courses of sorafinib
+  select(Reg., Time_Point_Recieved_Sorafinib, Treatment.Arm) %>% 
+  unique()
+
+  
+# head(armC.filter)
+dim(armC.filter) #77 patients form 92 total 
+```
+
+```{r}
+ITD.data <- CDE.1031 %>% 
+  filter(FLT3.ITD.positive. == "Yes") %>% 
+  select(Reg., USI, Treatment.Arm_orig=Treatment.Arm, FLT3.ITD.positive., FLT3.ITD.allelic.ratio,
+         CEBPA.mutation., NPM.mutation.,
+         matches("EFS|OS|Event|Fusion|FOI")) %>% 
+  left_join(., armC.filter, by="Reg.") %>% 
+  left_join(., select(WT1,Reg., contains("WT1")),by="Reg.") %>% 
+  left_join(., select(AR,Reg., Classified.AR), by="Reg.") %>% 
+  mutate(AML="AML",  #for quirky function - Requires a grouping variable....
+         NUP98.NSD1=ifelse(grepl("NUP98-NSD1",Primary.Fusion.CNV), "Yes", "No" ), 
+         AR.OK=case_when(
+           NUP98.NSD1 == "Yes" ~ TRUE, 
+           NUP98.NSD1 == "No" & is.na(Classified.AR) ~ TRUE, 
+           grepl("^.+",Classified.AR) ~ FALSE)) %>% 
+  mutate(Mutation.Groups=case_when(
+           (NUP98.NSD1 == "Yes" & WT1.mutation == "Yes") & !grepl("DEK-NUP214", Primary.Fusion.CNV) ~ "NSD1.WT1.FLT3+", 
+           NUP98.NSD1 == "Yes" & WT1.mutation == "No" & !grepl("DEK-NUP214", Primary.Fusion.CNV) ~ "NSD1.FLT3+",
+           NUP98.NSD1 == "No" & WT1.mutation == "Yes" & !grepl("DEK-NUP214", Primary.Fusion.CNV) ~ "WT1.FLT3+",
+           grepl("DEK-NUP214", Primary.Fusion.CNV) ~ "NUP214.FLT3+",
+           NPM.mutation. == "Yes" | CEBPA.mutation. == "Yes" | grepl("MYH11|RUNX1T1", Primary.Fusion.CNV) ~ "Favorable.FLT3+",
+           TRUE ~ "FLT3+.alone")) %>% 
+  mutate(Mutation.3.Groups=case_when(
+         Mutation.Groups == "NSD1.WT1.FLT3+" ~ "NSD1.FLT3+",
+        (Mutation.Groups == "NUP214.FLT3+" | 
+           Mutation.Groups == "Favorable.FLT3+" | 
+           Mutation.Groups == "FLT3+.alone") ~ "FLT3+", 
+        TRUE ~ Mutation.Groups)) %>%
+  
+  filter(! (is.na(Treatment.Arm) & Treatment.Arm_orig=="Arm C")) %>% #These ones didnt have Sora in at least 2 courses
+  filter(AR.OK) %>% #remove those less than <0.1 AR that are NOT NUP98-NSD1 positives (cant lose power)
+
+  mutate(WT1.mutation=ifelse(is.na(WT1.mutation), "Unknown", WT1.mutation),
+         Treatment.Arm=ifelse(grepl(" A| B", Treatment.Arm_orig), "ArmA/B", "ArmC")) %>%
+  set_rownames(.$Reg.)
+
+dim(ITD.data)
+head(ITD.data[,1:5])
+table(ITD.data$NUP98.NSD1)
+# write.csv(ITD.data, "ITDpos_Cleaned_withMolecularAdded_7.17.19.csv", row.names = FALSE)
+```
+
+
+```{r}
+sum(is.na(ITD.data$EFS.time..days.))
+table(ITD.data$Treatment.Arm)
+table(ITD.data$NUP98.NSD1,ITD.data$WT1.mutation)
+```
+
+```{r}
+table(ITD.data$Primary.Fusion.CNV, useNA = "always")
+```
+
+```{r}
+table(ITD.data$Primary.Fusion.CNV,ITD.data$Treatment.Arm, useNA = "always")
+table(ITD.data$WT1.mutation, ITD.data$Treatment.Arm, useNA = "always")
+table(ITD.data$CEBPA.mutation., ITD.data$Treatment.Arm, useNA = "always")
+table(ITD.data$NPM.mutation., ITD.data$Treatment.Arm, useNA = "always")
+```
+
+```{r}
+table(ITD.data$Mutation.3.Groups)
+table(ITD.data$Mutation.Groups)
+```
+
+
+```{r}
+table(ITD.data$Primary.Fusion.CNV, ITD.data$Mutation.Groups,ITD.data$CEBPA.mutation., useNA = "always")
+table(ITD.data$Primary.Fusion.CNV, ITD.data$Mutation.Groups, ITD.data$NPM.mutation., useNA = "always")
+```
+
+
+
+#Kaplan-Meier Plots 
+
+## ITD ArmC vs ArmA/B
+
+```{r}
+all <- KM.plots(df=ITD.data,
+                "AML",
+                covariate = "Treatment.Arm",
+                cohort = "1031")
+
+all
+```
+
+
+```{r fig.width=11}
+grid.arrange(grobs=c(all$OS, all$EFS), ncol=2)
+```
+
+
+## ITD+ split by NSD1
+
+```{r}
+table(ITD.data$WT1.mutation, ITD.data$NUP98.NSD1)
+```
+
+```{r}
+NSD1.all <- KM.plots(df=filter(ITD.data), # WT1.mutation == "No" 
+                    "AML", 
+                    covariate = "NUP98.NSD1", 
+                    cohort = "1031")
+
+```
+
+```{r}
+NSD1.T.arms <- KM.plots(df=filter(ITD.data), #WT1.mutation != "Yes" 
+                "Treatment.Arm",
+                covariate = "NUP98.NSD1",
+                cohort = "1031")
+```
+
+```{r fig.width=16}
+grid.arrange(grobs=c(NSD1.all$OS,NSD1.T.arms$OS), ncol=3, nrow=1)
+grid.arrange(grobs=c(NSD1.all$EFS,NSD1.T.arms$EFS), ncol=3, nrow=1)
+```
+
+
+
+## ITD+ split by WT1 
+
+```{r}
+table(ITD.data$WT1.mutation, ITD.data$Primary.Fusion.CNV)
+```
+
+! c(grepl("Yes", WT1.mutation) & grepl("NUP98-NSD1", Primary.Fusion.CNV)
+
+```{r}
+WT1.all <- KM.plots(df=filter(ITD.data,WT1.mutation != "Unknown",
+                              NUP98.NSD1!="Yes"), 
+                    "AML", 
+                    covariate = "WT1.mutation", cohort = "1031")
+```
+
+```{r}
+WT1.T.arms <- KM.plots(df=filter(ITD.data, WT1.mutation != "Unknown",
+                              !grepl("NUP98-NSD1", Primary.Fusion.CNV)),
+                "Treatment.Arm",
+                covariate = "WT1.mutation",
+                cohort = "1031")
+```
+
+
+```{r fig.width=16}
+grid.arrange(grobs=c(WT1.all$OS, WT1.T.arms$OS), ncol=3, nrow=1)
+grid.arrange(grobs=c(WT1.all$EFS, WT1.T.arms$EFS), ncol=3, nrow=1)
+
+```
+
+
+## Arm C Mutation Groups
+
+```{r}
+table(ITD.data$Mutation.Groups, ITD.data$Treatment.Arm)
+```
+
+```{r}
+table(ITD.data$Mutation.Groups, ITD.data$Mutation.3.Groups)
+```
+
+```{r}
+temp <- ITD.data %>% 
+  filter(Mutation.Groups=="Favorable.FLT3+") %>% 
+  mutate(high.AR=FLT3.ITD.allelic.ratio >= 0.4) %>%
+  group_by(high.AR,NPM.mutation., CEBPA.mutation., Fusion.Group) %>% 
+  summarise(N=n()) 
+
+temp
+```
+
+```{r}
+mut.all <- KM.plots(df=ITD.data, 
+                    "AML", 
+                    covariate = "Mutation.Groups",
+                    cohort = "1031")
+```
+
+```{r}
+mut.T.arms <- KM.plots(df=ITD.data,
+                "Treatment.Arm",
+                covariate = "Mutation.Groups",
+                cohort = "1031")
+```
+
+```{r fig.width=16, fig.height=6}
+grid.arrange(grobs=c(mut.all$OS, mut.T.arms$OS), ncol=3, nrow=1)
+grid.arrange(grobs=c(mut.all$EFS, mut.T.arms$EFS), ncol=3, nrow=1)
+
+```
+
+```{r}
+mut.all.3 <- KM.plots(df=ITD.data,group_vars = NULL, 
+                    covariate = "Mutation.3.Groups",
+                    cohort = "1031")
+mut.all.3
+```
+
+```{r}
+mut.T.arms.3 <- KM.plots(df=ITD.data, 
+                group_vars="Treatment.Arm",
+                covariate = "Mutation.3.Groups",
+                cohort = "1031")
+
+
+mut.T.arms.3
+```
+
+```{r fig.width=16, fig.height=6}
+grid.arrange(grobs=c(mut.all.3$OS, mut.T.arms.3$OS), ncol=3, nrow=1)
+grid.arrange(grobs=c(mut.all.3$EFS, mut.T.arms.3$EFS), ncol=3, nrow=1)
+```
+
+
+
+#CHECK 
+
+
+```{r}
+ITD.Feb <- read.csv("A_old/ITDpos_Cleaned_withMolecularAdded_02.25.2019.csv")
+
+# head(ITD.Feb)
+```
+
+```{r}
+check <- ITD.Feb %>% 
+  select(Reg.=Patient.registration.number,USI,Treatment.Arm,WT1.mutation,NUP98.NSD1,Days.to.First.Event,First.Event) %>% 
+  filter(NUP98.NSD1 != "Unknown") #%>% 
+  # filter(Treatment.Arm != "Arm C")
+
+
+check2 <- ITD.data %>% 
+  select(Reg.,USI,Treatment.Arm_orig,WT1.mutation,NUP98.NSD1,EFS.time..days.,Event.ID) #%>% 
+  # filter(WT1.mutation != "Yes")
+
+```
+
+```{r}
+table(check$NUP98.NSD1, check$Treatment.Arm )
+table(ITD.data$NUP98.NSD1, ITD.data$Treatment.Arm_orig)
+```
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+

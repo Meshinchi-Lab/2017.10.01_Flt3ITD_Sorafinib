@@ -1,0 +1,99 @@
+---
+title: "Sorafinib FLT3-ITD Survival"
+author: "Jenny Smith"
+date: "June 18, 2019"
+output: html_document
+---
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 5, fig.width = 7)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/Clinical/analysis/2017.10.01_Flt3ITD_Sorafinib/')
+options(stringsAsFactors = FALSE)
+```
+
+
+```{r message=FALSE}
+library(magrittr)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+getwd()
+```
+
+```{r}
+source("~/scripts/survival_analysis/Survplot_Functions_2018.10.24.r")
+```
+
+
+#Define Functions to Be Used
+
+```{r}
+#https://stackoverflow.com/questions/21724212/set-r-to-include-missing-data-how-can-is-set-the-usena-ifany-option-for-t
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+
+#Read in the ITD, and Sorafinib Dosage Information 
+
+itd <- read.csv("~/reference_mapping-files/AAML1031_ITDpos_data_091917.csv", stringsAsFactors = FALSE)
+itd <- read.csv("~/reference_mapping-files/AAML1031_ITDpos_data_091917_molecular_added.csv", stringsAsFactors = FALSE)
+
+```{r}
+armC.IndI <- read.csv("AAML1031_Arm_C_dose_data_121318_INDUCTION_I.csv")
+```
+
+```{r}
+#this is the original one used 
+armC <- read.csv("AAML1031_ArmC_10.17.2017.csv", stringsAsFactors = FALSE) %>% 
+  
+  #this is an update version from nearly 2 years later. Need to cross-reference. # it has 7 additional armC patients 
+  full_join(., read.csv("AAML1031_Arm_C_dose_data_121318_InductionI.csv"),
+            by=c("Pt.ID"="Patient.registration.number")) %>% 
+  
+  select(Date.of.enrollment_2018=Date.of.enrollment, Treatment.Arm_2018=Treatment.Arm, everything())
+
+
+dim(armC) #92 patients 
+head(armC[,1:5])
+```
+
+
+
+#Read in the Molecular Data 
+
+```{r}
+WT1 <- read.csv("20190215_AAML1031_FLT3_ITD_positive_WT1_results.csv")
+
+head(WT1)
+dim(WT1) #177   9
+```
+
+```{r}
+AR <- read.csv("Copy of AAML1031_FLT3_ITD_less_than_0.1_AR.csv")
+
+head(AR)
+```
+
+
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
